@@ -1,0 +1,17 @@
+[project]
+name = "adaptive-retrieval"
+version = "0.1.0"
+description = "Route each question to no retrieval, light retrieval or deep retrieval with reranking"
+requires-python = ">=3.12,<3.13"
+dependencies = ["anthropic", "numpy", "pgvector", "psycopg[binary]", "pypdf", "scikit-learn"]
+
+[dependency-groups]
+models = ["sentence-transformers"]
+dev = ["pytest"]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
