@@ -191,10 +191,17 @@ def paired_delta(rows: list[dict], a: list[str], b: list[str]) -> dict:
 
 def compare(rows: list[dict], routed: list[str]) -> dict:
     """Baselines, router and oracle on the same questions. The oracle takes each question's label, and the
-    free `none` route where every route fails, so neither accuracy nor cost can beat it."""
+    least expensive measured route when every route fails. It maximizes accuracy first, then minimizes cost."""
     n = len(rows)
     baselines = {"never retrieve": ["none"] * n, "always light": ["light"] * n, "always deep": ["deep"] * n}
-    oracle = ["none" if r["all_failed"] else r["label"] for r in rows]
+    # Select by measured generation cost, including retrieval's rewrite cost.
+    # Route depth alone does not order token costs; even a failed call can be cheaper on deep.
+    oracle = [min((route for route in ROUTES if r["routes"][route]["correct"]),
+                  key=lambda route: r["routes"][route]["usd"] + (r["rewrite_usd"] if route != "none" else 0.0),
+                  default=None) for r in rows]
+    oracle = [route if route is not None else min(ROUTES,
+              key=lambda choice: r["routes"][choice]["usd"] + (r["rewrite_usd"] if choice != "none" else 0.0))
+              for r, route in zip(rows, oracle)]
     return {"systems": {name: score(rows, choice, charge_rewrite=False) for name, choice in baselines.items()}
             | {"router": score(rows, routed, charge_rewrite=True), "oracle": score(rows, oracle, charge_rewrite=False)},
             "router_minus_baseline": {name: paired_delta(rows, choice, routed) for name, choice in baselines.items()}}
@@ -217,6 +224,8 @@ def router_accuracy(rows: list[dict], routed: list[str]) -> dict:
 def evaluate(threshold: float, fake: bool = False) -> dict:
     path = labels_path(fake)
     rows = [json.loads(line) for line in path.read_text().splitlines()]
+    if len({r["id"] for r in rows}) != len(rows):
+        raise SystemExit(f"{path.name} contains duplicate question IDs; rerun label")
     errors = [r for r in rows if "error" in r]
     rows = [r for r in rows if "error" not in r]
     if missing := {q["id"] for q in questions()} - {r["id"] for r in rows + errors}:

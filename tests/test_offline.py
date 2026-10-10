@@ -82,3 +82,11 @@ def test_fake_reranker_orders_by_query_word_overlap():
     chunks = [{"content": "parking garage"}, {"content": "sick days carry over"}, {"content": "sick leave"}]
     assert [c["content"] for c in FakeReranker().rerank("do sick days carry over", chunks)] == [
         "sick days carry over", "sick leave", "parking garage"]
+
+
+def test_real_model_client_requires_explicit_model_ids(monkeypatch):
+    import pytest
+    monkeypatch.delenv("GENERATOR_MODEL", raising=False)
+    monkeypatch.delenv("JUDGE_MODEL", raising=False)
+    with pytest.raises(ValueError, match="GENERATOR_MODEL"):
+        LLM()

@@ -2,7 +2,7 @@
 
 [![Checks](https://github.com/Sankew/adaptive-retrieval/actions/workflows/checks.yml/badge.svg)](https://github.com/Sankew/adaptive-retrieval/actions/workflows/checks.yml)
 
-Not every question needs retrieval. "What is the capital of Japan?" doesn't, "What's the annual sick-day allowance?" needs one passage, and "During the holiday deploy freeze, which named person signs off a SEV1 fix?" needs two documents. This project answers each question on one of three routes and trains a small classifier to pick the cheapest route that still gets it right.
+Not every question needs retrieval. "What is the capital of Japan?" doesn't, "What's the annual sick-day allowance?" needs one passage, and "During the holiday deploy freeze, which named person signs off a SEV1 fix?" needs two documents. This project answers each question on one of three routes and trains a small classifier to pick the shallowest retrieval route judged correct.
 
 | Route | Retrieval | Cost |
 |---|---|---|
@@ -27,7 +27,7 @@ flowchart LR
 
 ## How it's labelled and trained
 
-- **Labels.** Every question is answered on all three routes, and Configured judging model judges each answer against the reference. The label is the cheapest route judged correct. When no route is, the label is `deep` and the question is counted in `all_routes_failed`.
+- **Labels.** Every question is answered on all three routes, and Configured judging model judges each answer against the reference. The label is the first correct route in the fixed order `none`, `light`, `deep`; this orders retrieval depth, not measured token cost. When no route is, the label is `deep` and the question is counted in `all_routes_failed`.
 - **Failures.** A refused or truncated answer is a wrong answer on that route, and its tokens still count toward cost.
 - **Spot-check.** `router.py spotcheck` samples 40 labelled questions with the conversation, the rewritten query and every route's answer and verdict, for checking by hand. `--sheet` reports the share of labels confirmed. The checked sheet gets committed as evidence, and `spotcheck` won't overwrite one that has marks in it.
 - **Router.** TF-IDF over word unigrams and bigrams, then logistic regression with balanced class weights, trained on the rewritten standalone question. If the top class probability is under 0.5, the question goes to `deep`: a wrong `deep` costs money, a wrong `none` costs the answer. The 0.5 was fixed before any test results; the threshold curve in the report is descriptive.
@@ -53,7 +53,7 @@ The corpus is 47 current Brackwater documents in Markdown, HTML and PDF, includi
 
 - never retrieve, always light, always deep;
 - the router;
-- the oracle: each question's label, and the free `none` route where every route fails, so no router can beat it on accuracy or cost.
+- the oracle: the cheapest measured correct route, including the rewrite cost for retrieval routes; when all routes fail, the cheapest measured route. It maximizes accuracy first and minimizes cost among routes with that accuracy.
 
 The same comparison is repeated on company questions alone. The retrieval routes are told to answer from documents only, so they fail general-knowledge questions by design, and "router beats always-deep" would otherwise mostly mean "the router spots general-knowledge questions".
 

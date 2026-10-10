@@ -76,3 +76,24 @@ def test_spotcheck_never_overwrites_hand_marks(tmp_path, monkeypatch):
     (tmp_path / "spotcheck.csv").write_text("id,label_ok\np3-001,1\n")
     with pytest.raises(SystemExit, match="already has hand marks"):
         router.spotcheck(5, 0)
+
+
+def test_oracle_uses_measured_cost_instead_of_route_depth():
+    row = labelled("a", "test", "none", "q", {"none": True, "light": True, "deep": True})
+    row["routes"]["none"]["usd"] = 0.02
+    row["routes"]["deep"]["usd"] = 0.0001
+    result = router.compare([row], ["none"])["systems"]["oracle"]
+    assert result["routes"] == {"deep": 1}
+    assert result["usd_per_1k"] == 0.1
+    for route in router.ROUTES:
+        row["routes"][route]["correct"] = False
+    row["all_failed"] = True
+    assert router.compare([row], ["none"])["systems"]["oracle"]["routes"] == {"deep": 1}
+
+
+def test_evaluate_rejects_duplicate_question_ids(tmp_path, monkeypatch):
+    monkeypatch.setattr(router, "RESULTS", tmp_path)
+    row = labelled("a", "train", "none", "q", {"none": True, "light": True, "deep": True})
+    (tmp_path / "labels.jsonl").write_text((json.dumps(row)+"\n")*2)
+    with pytest.raises(SystemExit, match="duplicate question IDs"):
+        router.evaluate(0.5)
