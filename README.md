@@ -1,105 +1,138 @@
 # Adaptive retrieval
 
-[![Checks](https://github.com/Sankew/adaptive-retrieval/actions/workflows/checks.yml/badge.svg)](https://github.com/Sankew/adaptive-retrieval/actions/workflows/checks.yml)
+[![Checks](https://github.com/Sankew/adaptive-retrieval/actions/workflows/checks.yml/badge.svg?branch=p3-routing)](https://github.com/Sankew/adaptive-retrieval/actions?query=branch%3Ap3-routing)
 
-Not every question needs retrieval. "What is the capital of Japan?" doesn't, "What's the annual sick-day allowance?" needs one passage, and "During the holiday deploy freeze, which named person signs off a SEV1 fix?" needs two documents. This project answers each question on one of three routes and trains a small classifier to pick the shallowest retrieval route judged correct.
+Some questions can be answered without documents. Others need one passage or evidence from several sources. This project compares three retrieval routes and trains a small classifier to choose the shallowest route judged correct for each question.
 
-| Route | Retrieval | Cost |
+The experiment uses documents from a fictional company, Brackwater Robotics. This reduces the chance that company facts already appear in a model's training data, while leaving the model free to answer general-knowledge questions without retrieval.
+
+**Status:** data validation and automated tests pass CI, including database tests with deterministic substitutes. Labelling and evaluation with real models are pending. There are no measured accuracy or cost improvements to report yet.
+
+## Retrieval routes
+
+| Route | Context supplied to the generator | Work involved |
 |---|---|---|
-| `none` | nothing; the model answers from general knowledge and abstains on company questions | one short call |
-| `light` | top 3 chunks by cosine similarity | one call, small prompt |
-| `deep` | top 30, reranked by a cross-encoder, top 10 kept | one call, large prompt, plus local reranking |
+| `none` | No documents; general knowledge is allowed, with instructions to abstain on company questions | One generation call |
+| `light` | Top 3 chunks from exact cosine search in pgvector | Embedding, search and one generation call |
+| `deep` | Top 30 chunks, reranked by `cross-encoder/ms-marco-MiniLM-L-6-v2`, with the top 10 retained | Embedding, search, local reranking and one generation call |
 
-It runs on a fictional company, Brackwater Robotics, so the model can't answer company questions from memory.
+Follow-ups are rewritten into standalone questions before routing. That adds a generation call. Retrieval depth changes the context size and local work; it does not guarantee a particular token cost.
 
 ```mermaid
 flowchart LR
-    Q[Question<br/>+ conversation] --> W{Follow-up?}
-    W -- yes --> R[Rewrite to a<br/>standalone question<br/>Configured generation model]
-    W -- no --> C
-    R --> C[Router<br/>TF-IDF + logistic regression]
-    C -- confident: none --> N[Answer without<br/>documents]
-    C -- confident: light --> L[Top 3<br/>pgvector]
-    C -- unsure, or deep --> D[Top 30 → MiniLM<br/>cross-encoder → top 10]
-    L --> A[Configured generation model<br/>cites document:section]
-    D --> A
+    Q[Question and conversation] --> W[Rewrite follow-ups into standalone questions]
+    W --> R[TF-IDF and logistic regression]
+    R --> N[No documents]
+    R --> L[Top 3 chunks]
+    R --> D[Top 30 chunks, reranked to 10]
+    N --> G[Generate an answer]
+    L --> G
+    D --> G
 ```
 
-## How it's labelled and trained
+## Setup
 
-- **Labels.** Every question is answered on all three routes, and Configured judging model judges each answer against the reference. The label is the first correct route in the fixed order `none`, `light`, `deep`; this orders retrieval depth, not measured token cost. When no route is, the label is `deep` and the question is counted in `all_routes_failed`.
-- **Failures.** A refused or truncated answer is a wrong answer on that route, and its tokens still count toward cost.
-- **Spot-check.** `router.py spotcheck` samples 40 labelled questions with the conversation, the rewritten query and every route's answer and verdict, for checking by hand. `--sheet` reports the share of labels confirmed. The checked sheet gets committed as evidence, and `spotcheck` won't overwrite one that has marks in it.
-- **Router.** TF-IDF over word unigrams and bigrams, then logistic regression with balanced class weights, trained on the rewritten standalone question. If the top class probability is under 0.5, the question goes to `deep`: a wrong `deep` costs money, a wrong `none` costs the answer. The 0.5 was fixed before any test results; the threshold curve in the report is descriptive.
-- **Follow-ups.** A follow-up ("And do they carry over?") is rewritten into a standalone question before routing and retrieval. The rewrite call counts toward cost. The answer and the judge both see the conversation.
+Use Python 3.12, uv and Docker. Run commands from the repository root.
 
-## Evaluation
+```bash
+uv sync --locked --group models --group dev
+docker compose up -d --wait db
+docker compose exec db createdb -U postgres adaptive_rag
+export DATABASE_URL="postgresql://postgres:postgres@localhost:5432/adaptive_rag"
+```
 
-**Data:** `eval/p3.jsonl`, 428 questions, generated from the templates in `eval/src/`:
+Create `adaptive_rag` once. The Compose service binds to local port 5432. If another project already runs pgvector on that port, reuse that server and create this project's separate database there. Indexing rebuilds the project's tables.
 
-| Type | Count | Example |
+Generation and judging use the Anthropic SDK. Replace the placeholders with an API key and actual model IDs that support the request's effort settings and structured JSON output:
+
+```bash
+export ANTHROPIC_API_KEY="your-api-key"
+export GENERATOR_MODEL="your-generation-model-id"
+export JUDGE_MODEL="your-judging-model-id"
+```
+
+Local embeddings use `BAAI/bge-small-en-v1.5`; embedding and reranking models are downloaded on first use. Before reporting cost, set `GENERATOR_INPUT_USD_PER_MILLION` and `GENERATOR_OUTPUT_USD_PER_MILLION` to numeric rates for the chosen generation model. The defaults, 0.10 and 0.50, are illustrative.
+
+## Label, train and evaluate
+
+```bash
+uv run --locked --group models python router.py label
+uv run --locked python router.py evaluate
+uv run --locked python router.py spotcheck
+# Review results/spotcheck.csv and fill label_ok with 1 or 0, then:
+uv run --locked python router.py spotcheck --sheet results/spotcheck.csv
+```
+
+1. **Label:** answer each question on all three routes and judge each answer against its reference. The training label is the first correct route in the order `none`, `light`, `deep`. This selects retrieval depth rather than the lowest measured cost. When all routes fail, the label is `deep` and `all_failed` is recorded.
+2. **Train:** fit TF-IDF word unigrams and bigrams followed by logistic regression with balanced class weights. Training uses the standalone question. A top-class probability below 0.5 sends the question to `deep`.
+3. **Evaluate:** compare the fitted router with fixed routes on the held-out test groups. The threshold curve describes alternative settings; the default threshold is fixed before test results.
+4. **Review:** sample up to 40 questions with their history, rewritten query, route answers and verdicts. The completed sheet reports the share of labels confirmed. Sampling refuses to overwrite a sheet with existing review marks.
+
+Labelling makes generation and judging calls for each route, plus rewrites for follow-ups. It can incur substantial API usage. Complete responses are cached by the full request in `.cache/llm/`; unchanged requests reuse them, while new or failed requests can incur additional charges.
+
+### Data and splits
+
+The corpus has **47 current documents** in Markdown, HTML and PDF. Some FAQ pages retain outdated statements that conflict with current policy.
+
+`eval/p3.jsonl` contains **428 questions**:
+
+| Type | Count | Purpose |
 |---|---|---|
-| single-source | 269 | "What's the annual sick-day allowance?" |
-| general knowledge | 60 | "What is the boiling point of water at sea level in Celsius?" |
-| multi-source | 48 | "Who approves a 20% discount, by name?"; 2 of them need every document's version stamp and are built to fail on all routes |
-| follow-up | 31 | in 25 conversations, with history |
-| unanswerable | 20 | company questions the documents don't cover |
+| Single-source | 269 | Find a fact in one document |
+| General knowledge | 60 | Test when retrieval is unnecessary |
+| Multi-source | 48 | Combine evidence across documents, including two cases designed to exceed the available context |
+| Follow-up | 31 | Resolve context across 25 conversations |
+| Unanswerable | 20 | Abstain when company information is undocumented |
 
-The corpus is 47 current Brackwater documents in Markdown, HTML and PDF, including stale FAQ pages that disagree with current policy.
+The training split contains **318 questions in 125 groups**; the test split contains **110 questions in 42 groups**. Paraphrases of a fact stay in one group. Conversations are grouped with the fact templates they repeat, using the mapping in `eval/src/other.py`.
 
-**Splits** are by group, never by question: 125 groups and 318 questions train, 42 groups and 110 questions test. A group is a fact template with its paraphrases, or a whole conversation together with the templates its turns restate (listed in `eval/src/other.py`). Otherwise a fact asked in a test conversation could also be a training question, and the router would look better than it is. `eval.validate` fails if a group, a question's text, or a fact (same sources, same reference answer) appears in both splits.
+The validator rejects groups, identical question text and identical source/reference-answer combinations shared across splits. This catches exact overlap; it cannot rule out every semantic paraphrase.
 
-**Systems compared on the test split:**
-
-- never retrieve, always light, always deep;
-- the router;
-- the oracle: the cheapest measured correct route, including the rewrite cost for retrieval routes; when all routes fail, the cheapest measured route. It maximizes accuracy first and minimizes cost among routes with that accuracy.
-
-The same comparison is repeated on company questions alone. The retrieval routes are told to answer from documents only, so they fail general-knowledge questions by design, and "router beats always-deep" would otherwise mostly mean "the router spots general-knowledge questions".
-
-**Metrics:**
-
-- **Accuracy** (judge), with k/n and a 95% interval from resampling whole groups, since paraphrases are correlated. Router minus each baseline is paired on the same questions, with the same kind of interval.
-- **Cost:** API dollars per 1,000 questions, from the token counts the API returns, including the rewrite and excluding the offline judge.
-- **Local retrieval time** (embedding, search, reranking) is reported in milliseconds, separately from model latency. `results/env.json` records the machine and whether models ran on MPS or CPU, since both change these numbers.
-- **Router accuracy** is reported overall, for light vs deep alone, and by question type. Questions every route fails are left out (their `deep` label is arbitrary) and counted. General-knowledge vs company questions is easy to separate, so the overall number flatters the router; light vs deep is the hard part.
-- `results/misroutes.csv` lists every test question the router sent somewhere other than its label, for error analysis.
-
-## Results
-
-**Pending.** Labelling needs `bge-small-en-v1.5`, the MiniLM reranker and an Anthropic API key, and hasn't been run yet. CI checks the data, the routing and scoring logic on synthetic labels, and a full fake labelling pass against Postgres; none of that is a result.
-
-## Run
-
-Python 3.12, [uv](https://docs.astral.sh/uv/), Docker:
+Questions are generated from templates. Edit `eval/src/`, rebuild, then validate:
 
 ```bash
-docker compose up -d db
-uv sync --group models --group dev
-export DATABASE_URL=postgresql://postgres:postgres@localhost:5432/rag ANTHROPIC_API_KEY=...
-export GENERATOR_MODEL="<generation-model-id>" JUDGE_MODEL="<judging-model-id>"
-export GENERATOR_INPUT_USD_PER_MILLION="<input-rate>" GENERATOR_OUTPUT_USD_PER_MILLION="<output-rate>"
-uv run python router.py label          # about 428 × (3 answers + 3 judgements) calls, cached in .cache/llm/
-uv run python router.py evaluate       # writes results/routing.json and results/misroutes.csv
-uv run python router.py spotcheck      # then fill label_ok and run with --sheet results/spotcheck.csv
+uv run --locked python eval/src/build.py
+uv run --locked python -m eval.validate
 ```
 
-Tests rebuild their tables, so they use a separate database:
+### Comparisons and metrics
+
+The report compares **never retrieve**, **always light**, **always deep**, the **router**, and an **oracle**. For each question, the oracle selects the cheapest measured correct route, including rewrite cost for retrieval routes. If every route fails, it selects the cheapest route. Its decisions use verdicts that a deployed router would not have.
+
+The comparison is also reported for company questions alone. Retrieval routes are instructed to use documents only, so general-knowledge questions can otherwise make route selection look better without showing an improvement in retrieval depth.
+
+- **Answer accuracy:** judged correctness, counts and 95% bootstrap intervals obtained by resampling whole groups. Router-versus-baseline differences are paired on the same questions.
+- **Estimated cost per 1,000 questions:** generation token counts multiplied by configured rates, including applicable rewrites and excluding offline judging. The router pays for follow-up rewrites even when it selects `none`; fixed routes and the oracle pay for them when retrieving. Cached token counts remain in the estimate, so this is not the bill for an evaluation rerun.
+- **Timing:** local embedding, search and reranking time are separate from model latency. Timings come from the labelling pass; cached model latency reflects the original call. The machine and model device are recorded in `results/env.json`.
+- **Route-label accuracy:** overall, by question type, and for light versus deep. Questions where all routes fail are excluded from this metric and counted separately because their `deep` label is arbitrary.
+- **Misroutes:** questions where the chosen route differs from the training label. A different route can still answer correctly; the CSV includes answer correctness to distinguish those cases.
+
+### Output and failures
+
+Labelling writes `results/labels.jsonl` and `results/env.json`. Evaluation writes `results/routing.json` and `results/misroutes.csv`. Review uses `results/spotcheck.csv`.
+
+Refused or truncated answers count as wrong, with their generation tokens included in cost. Transient API failures and unusable rewrite or judge responses produce error rows, excluded from evaluation and retried on the next labelling run. Invalid credentials or model IDs stop the run. Label files are replaced atomically when a pass finishes; evaluation rejects duplicate IDs and missing question rows.
+
+`label --fake` replaces embeddings and reranking with deterministic substitutes, but **still makes real generation and judging calls**. It writes separate `labels_fake.jsonl` and `env_fake.json` files. Use `evaluate --fake` for those labels. This option is not an API-free smoke test.
+
+## Tests without model calls
+
+The test suite uses mocked model clients and deterministic embeddings. Database tests require a dedicated pgvector database and rebuild its tables:
 
 ```bash
-docker compose exec db createdb -U postgres rag_test
-TEST_DATABASE_URL=postgresql://postgres:postgres@localhost:5432/rag_test uv run pytest -q
+uv sync --locked --group dev
+docker compose exec db createdb -U postgres adaptive_rag_test
+TEST_DATABASE_URL="postgresql://postgres:postgres@localhost:5432/adaptive_rag_test" \
+  uv run --locked --group dev pytest -q
 ```
 
-Only complete responses are cached. When a rewrite or judge call fails on a transient error (timeout, rate limit, overload), the question is written as an error row, left out of evaluation (the count is in the report) and retried on the next run. A bad key or model name stops the run. Labels are written to a temporary file and moved into place at the end, so a crash leaves the previous labels intact, and `evaluate` refuses a labels file with questions missing. `label --fake` (hashing embedder, word-overlap reranker, real model calls) writes `labels_fake.jsonl`, never `labels.jsonl`. The questions are generated: edit `eval/src/`, then `uv run python eval/src/build.py` and `uv run python -m eval.validate`.
+Create the test database once. CI also checks that rebuilding the templates leaves `eval/p3.jsonl` unchanged.
 
 ## Limitations
 
-- The corpus, questions and reference answers are synthetic fixtures; answers are graded automatically. This can reinforce shared errors. Labels are only as good as the judge, which is why they are spot-checked by hand.
-- An unanswerable company question is labelled `none` when the no-retrieval route correctly abstains. The router can learn that from topic words, which says nothing about whether the documents cover a question.
-- The overlap between conversations and templates is listed by hand. The validator catches exact repeats, not every paraphrase.
-- Conversation history holds the reference answers to earlier turns, so rewrites and answers always build on a correct conversation. Real conversations aren't that clean.
-- TF-IDF sees words, not intent. It can't tell a single-hop question from a multi-hop one phrased with the same words; the misroutes file shows where that matters.
-- Model latency comes from the first real call and is replayed from the cache, so it reflects network conditions at labelling time.
-- Generation prices come from `GENERATOR_INPUT_USD_PER_MILLION` and `GENERATOR_OUTPUT_USD_PER_MILLION`. Defaults are illustrative (0.10 and 0.50); set the actual rates for the selected model before reporting costs.
-- One small corpus. The labels, and so the router, are specific to it.
+- Synthetic documents, questions and references can share wording and mistakes. Automated verdicts need manual review before supporting performance claims.
+- The router learns lexical patterns from one corpus. It does not directly reason about how many documents a question needs.
+- Correct abstention can give an unanswerable company question a `none` label. Recognising its wording does not prove the router knows what the corpus covers.
+- Conversation history contains reference answers to earlier turns. The experiment does not measure how routing behaves after an earlier answer is wrong.
+- The conversation/template overlap map is maintained manually, and exact-match validation cannot detect all related facts.
+- Local timing depends on hardware and model device. Cached model timing records earlier network conditions rather than fresh end-to-end request latency.
