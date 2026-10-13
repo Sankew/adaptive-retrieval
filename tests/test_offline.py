@@ -121,4 +121,6 @@ def test_gemini_models_use_thinking_levels_and_refused_answers_are_not_cached(tm
             "gemini-test-flash", "s", "p", effort="low", max_tokens=5)
     assert raised.value.output_tokens == 50 and not (tmp_path / "cut").exists()
     assert transient(gemini_errors.ClientError(429, {"error": {"message": "quota"}}))
+    daily = {"error": {"message": "quota", "details": [{"violations": [{"quotaId": "GenerateRequestsPerDayPerProjectPerModel-FreeTier"}]}]}}
+    assert not transient(gemini_errors.ClientError(429, daily))
     assert not transient(gemini_errors.ClientError(400, {"error": {"message": "unknown model"}}))
