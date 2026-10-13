@@ -4,6 +4,8 @@ from types import SimpleNamespace
 import anthropic
 import httpx2 as httpx
 import pytest
+from google.genai import errors as gemini_errors
+from google.genai import types as gemini_types
 
 from eval.validate import check
 from rag.answer import GROUNDED, UNGROUNDED, answer, judge, rewrite
@@ -90,3 +92,33 @@ def test_real_model_client_requires_explicit_model_ids(monkeypatch):
     monkeypatch.delenv("JUDGE_MODEL", raising=False)
     with pytest.raises(ValueError, match="GENERATOR_MODEL"):
         LLM()
+
+
+class FakeGemini:
+    """Stands in for google.genai.Client: answers every call with `text` and the given finish reason."""
+
+    def __init__(self, text: str, finish: str = "STOP") -> None:
+        self.text, self.finish, self.calls = text, finish, []
+        self.models = self
+
+    def generate_content(self, model, contents, config):
+        self.calls.append({"model": model, "contents": contents, "config": config})
+        return SimpleNamespace(
+            candidates=[SimpleNamespace(finish_reason=gemini_types.FinishReason[self.finish])], text=self.text,
+            usage_metadata=SimpleNamespace(prompt_token_count=100, candidates_token_count=20, thoughts_token_count=30),
+            model_version=f"{model}-001", prompt_feedback=None)
+
+
+def test_gemini_models_use_thinking_levels_and_refused_answers_are_not_cached(tmp_path):
+    gemini = FakeGemini("Tokyo.")
+    result = LLM(cache_dir=tmp_path / "ok", gemini=gemini).complete(
+        "gemini-test-flash", UNGROUNDED, "What is the capital of Japan?", effort="low", max_tokens=8192)
+    config = gemini.calls[0]["config"]
+    assert config.thinking_config.thinking_level == gemini_types.ThinkingLevel.LOW and config.temperature is None
+    assert result["text"] == "Tokyo." and result["output_tokens"] == 50  # thinking is billed as output
+    with pytest.raises(LLMError) as raised:
+        LLM(cache_dir=tmp_path / "cut", gemini=FakeGemini("Tok", "MAX_TOKENS")).complete(
+            "gemini-test-flash", "s", "p", effort="low", max_tokens=5)
+    assert raised.value.output_tokens == 50 and not (tmp_path / "cut").exists()
+    assert transient(gemini_errors.ClientError(429, {"error": {"message": "quota"}}))
+    assert not transient(gemini_errors.ClientError(400, {"error": {"message": "unknown model"}}))

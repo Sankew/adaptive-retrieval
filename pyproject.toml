@@ -3,7 +3,15 @@ name = "adaptive-retrieval"
 version = "0.1.0"
 description = "Route each question to no retrieval, light retrieval or deep retrieval with reranking"
 requires-python = ">=3.12,<3.13"
-dependencies = ["anthropic", "numpy", "pgvector", "psycopg[binary]", "pypdf", "scikit-learn"]
+dependencies = [
+    "anthropic",
+    "google-genai>=2.30.0",
+    "numpy",
+    "pgvector",
+    "psycopg[binary]",
+    "pypdf",
+    "scikit-learn",
+]
 
 [dependency-groups]
 models = ["sentence-transformers"]

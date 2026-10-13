@@ -93,6 +93,7 @@ def label(fake: bool, reindex: bool = False) -> None:
     written as an error row, left out of evaluation and retried next run. A bad key or model stops the run.
     """
     import anthropic
+    from google.genai import errors as gemini_errors
 
     from rag.models import Embedder, FakeEmbedder, FakeReranker, Reranker
     from rag.pipeline import ensure_index
@@ -119,7 +120,7 @@ def label(fake: bool, reindex: bool = False) -> None:
                     else:
                         verdict = judge(llm, q["question"], q["reference_answer"], result["text"], q["history"])
                     row["routes"][route] = {**result, "correct": verdict["correct"], "reason": verdict["reason"]}
-            except (LLMError, anthropic.APIError) as e:
+            except (LLMError, anthropic.APIError, gemini_errors.APIError) as e:
                 if not (isinstance(e, LLMError) or transient(e)):
                     raise
                 out.write(json.dumps({**row, "error": f"{type(e).__name__}: {e}"}) + "\n")
