@@ -6,7 +6,7 @@ Some questions can be answered without documents. Others need one passage or evi
 
 The experiment uses documents from a fictional company, Brackwater Robotics. This reduces the chance that company facts already appear in a model's training data, while leaving the model free to answer general-knowledge questions without retrieval.
 
-**Status:** data validation and automated tests pass CI, including database tests with deterministic substitutes. Labelling and evaluation with real models are pending. There are no measured accuracy or cost improvements to report yet.
+**Status:** data validation and automated tests pass CI, including database tests with deterministic substitutes. Retrieval has been measured with the real embedding and reranking models (see [Retrieval results](#retrieval-results)). Labelling, training and the route comparison need a generation model and have not been run, so there are no accuracy or cost results yet.
 
 ## Retrieval routes
 
@@ -114,6 +114,19 @@ Labelling writes `results/labels.jsonl` and `results/env.json`. Evaluation write
 Refused or truncated answers count as wrong, with their generation tokens included in cost. Transient API failures and unusable rewrite or judge responses produce error rows, excluded from evaluation and retried on the next labelling run. Invalid credentials or model IDs stop the run. Label files are replaced atomically when a pass finishes; evaluation rejects duplicate IDs and missing question rows.
 
 `label --fake` replaces embeddings and reranking with deterministic substitutes, but **still makes real generation and judging calls**. It writes separate `labels_fake.jsonl` and `env_fake.json` files. Use `evaluate --fake` for those labels. This option is not an API-free smoke test.
+
+### Retrieval results
+
+Measured on 2026-10-13 with `BAAI/bge-small-en-v1.5` and the `cross-encoder/ms-marco-MiniLM-L-6-v2` reranker; no generation model was called (`uv run --locked --group models python router.py retrieval`, output in `results/retrieval.json`). The table counts how often a route's chunks include every source document of a question. It says nothing about whether the answer would be right, and it leaves out the 31 follow-ups, which need the model's rewrite, and the 80 questions with no source.
+
+| Questions | Light (top 3) | Deep (top 30, reranked to 10) | Top 30 before reranking |
+|---|---|---|---|
+| Single-source (269) | 96.7% (94.2–98.8) | 98.5% (96.9–99.6) | 99.6% |
+| Multi-source (48) | **47.9%** (31.8–63.6) | **83.3%** (65.9–95.9) | 91.7% |
+
+Ranges are 95% intervals from resampling whole question groups.
+
+On multi-source questions light retrieval missed at least one source more than half the time, and deep retrieval recovered 17 of those. On single-source questions the two are close: deep found 6 sources light missed, and reranking pushed out 1 that light had.
 
 ## Tests without model calls
 

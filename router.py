@@ -4,6 +4,7 @@
     uv run python router.py evaluate                    # train on train, compare systems on test
     uv run python router.py spotcheck                   # sample labels to check by hand
     uv run python router.py spotcheck --sheet results/spotcheck.csv   # score the checked sheet
+    uv run --group models python router.py retrieval    # light vs deep retrieval only, no model calls
 """
 import argparse
 import csv
@@ -273,6 +274,37 @@ def evaluate(threshold: float, fake: bool = False) -> dict:
     return report
 
 
+def retrieval(fake: bool = False, reindex: bool = False) -> dict:
+    """Light vs deep retrieval with no model calls: how often each returns a chunk from every source
+    document. Follow-ups are left out (routing them needs the model's rewrite), as are questions with
+    no source."""
+    from rag.models import Embedder, FakeEmbedder, FakeReranker, Reranker
+    from rag.pipeline import ensure_index
+    embedder, reranker = (FakeEmbedder(), FakeReranker()) if fake else (Embedder(), Reranker())
+    conn = store.connect()
+    ensure_index(conn, embedder, reindex)
+    rows = []
+    for q in questions():
+        if not q["sources"] or q["history"]:
+            continue
+        want = {s["document_id"] for s in q["sources"]}
+        candidates = store.search(conn, embedder.embed([q["question"]], query=True)[0], DEEP_CANDIDATES)
+        found = {name: float(want <= {c["document_id"] for c in chunks}) for name, chunks in
+                 (("light", candidates[:LIGHT_K]), ("deep", reranker.rerank(q["question"], candidates)[:DEEP_K]),
+                  ("candidates", candidates))}
+        rows.append({"id": q["id"], "type": q["type"], "group": q["group"], **found})
+    report = {"models": {"embedder": embedder.name, "fake": fake}, "questions": len(rows)}
+    for kind in sorted({r["type"] for r in rows}):
+        subset = [r for r in rows if r["type"] == kind]
+        report[kind] = {"n": len(subset), **{name: dict(zip(("found", "ci95"), group_bootstrap(subset, [r[name] for r in subset])))
+                                             for name in ("light", "deep", "candidates")},
+                        "deep_only": int(sum(r["deep"] and not r["light"] for r in subset)),
+                        "light_only": int(sum(r["light"] and not r["deep"] for r in subset))}
+    RESULTS.mkdir(exist_ok=True)
+    (RESULTS / ("retrieval_fake.json" if fake else "retrieval.json")).write_text(json.dumps(report, indent=2) + "\n")
+    return report
+
+
 def wilson(k: int, n: int, z: float = 1.96) -> list[float]:
     """95% Wilson interval for k successes in n independent samples."""
     p, d = k / n, 1 + z * z / n
@@ -323,8 +355,13 @@ def main() -> None:
     spot.add_argument("--n", type=int, default=40)
     spot.add_argument("--seed", type=int, default=0)
     spot.add_argument("--sheet", type=Path, help="score a checked sheet instead of writing a new one")
+    ret = sub.add_parser("retrieval", help="light vs deep retrieval, no model calls")
+    ret.add_argument("--fake", action="store_true", help="hashing embedder and word-overlap reranker")
+    ret.add_argument("--reindex", action="store_true", help="replace an index built with a different embedder")
     args = parser.parse_args()
-    if args.command == "label":
+    if args.command == "retrieval":
+        print(json.dumps(retrieval(args.fake, args.reindex), indent=2))
+    elif args.command == "label":
         label(args.fake, args.reindex)
     elif args.command == "evaluate":
         print(json.dumps(evaluate(args.threshold, args.fake), indent=2))

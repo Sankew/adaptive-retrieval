@@ -1,0 +1,59 @@
+{
+  "models": {
+    "embedder": "BAAI/bge-small-en-v1.5",
+    "fake": false
+  },
+  "questions": 317,
+  "multi": {
+    "n": 48,
+    "light": {
+      "found": 0.479,
+      "ci95": [
+        0.318,
+        0.636
+      ]
+    },
+    "deep": {
+      "found": 0.833,
+      "ci95": [
+        0.659,
+        0.959
+      ]
+    },
+    "candidates": {
+      "found": 0.917,
+      "ci95": [
+        0.8,
+        1.0
+      ]
+    },
+    "deep_only": 17,
+    "light_only": 0
+  },
+  "single": {
+    "n": 269,
+    "light": {
+      "found": 0.967,
+      "ci95": [
+        0.942,
+        0.988
+      ]
+    },
+    "deep": {
+      "found": 0.985,
+      "ci95": [
+        0.969,
+        0.996
+      ]
+    },
+    "candidates": {
+      "found": 0.996,
+      "ci95": [
+        0.988,
+        1.0
+      ]
+    },
+    "deep_only": 6,
+    "light_only": 1
+  }
+}

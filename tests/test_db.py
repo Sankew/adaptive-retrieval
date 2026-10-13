@@ -74,3 +74,13 @@ def test_failed_answers_count_as_wrong_and_failed_rewrites_become_error_rows(lab
     assert {r["type"] for r in errors} == {"followup"}  # the rewrite failed, so the question can't be routed
     answered = [r for r in rows if "error" not in r]
     assert all(r["all_failed"] and r["routes"]["deep"]["failed"] and r["routes"]["deep"]["usd"] > 0 for r in answered)
+
+
+def test_retrieval_report_compares_light_and_deep_without_model_calls(conn, tmp_path, monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", os.environ["TEST_DATABASE_URL"])
+    monkeypatch.setattr(router, "RESULTS", tmp_path)
+    report = router.retrieval(fake=True)
+    assert report["questions"] > 300 and {"single", "multi"} <= set(report)
+    single = report["single"]
+    assert 0 <= single["light"]["found"] <= single["candidates"]["found"] <= 1  # top 3 is a subset of top 30
+    assert (tmp_path / "retrieval_fake.json").exists()
