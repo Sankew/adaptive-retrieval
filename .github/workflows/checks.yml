@@ -1,0 +1,39 @@
+name: Checks
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      db:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: rag
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 2s --health-retries 30
+    env:
+      TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/rag
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          python-version: "3.12"
+      - name: Questions match their templates
+        run: |
+          uv run --locked python eval/src/build.py
+          git diff --exit-code eval/p3.jsonl
+      - run: uv run --locked python -m eval.validate
+      - run: uv run --locked --group dev pytest -q
